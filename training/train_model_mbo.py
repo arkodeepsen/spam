@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import nltk, string, logging, pickle
+import nltk, string, logging, pickle, torch
 import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import Counter
@@ -12,9 +12,14 @@ from sklearn.svm import SVC
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, precision_score, f1_score
+from torch.cuda import is_available as cuda_available
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class MonarchButterflyOptimizer:
-    def __init__(self, bounds, n_butterflies=20, p_period=1.2, migration_ratio=0.85, max_iter=30):
+    def __init__(self, bounds, n_butterflies=20, p_period=1.2, migration_ratio=0.85, max_iter=30, use_gpu=False):
         self.bounds = bounds
         self.n_butterflies = n_butterflies
         self.p_period = p_period
@@ -23,31 +28,50 @@ class MonarchButterflyOptimizer:
         self.best_solution = None
         self.best_fitness = float('-inf')
         
+        # GPU setup
+        self.use_gpu = use_gpu and cuda_available()
+        self.device = torch.device('cuda' if self.use_gpu else 'cpu')
+        logger.info(f"Using device: {self.device}")
+
     def initialize(self):
-        population = []
-        for _ in range(self.n_butterflies):
-            butterfly = {}
-            for param, (low, high) in self.bounds.items():
-                if isinstance(low, int) and isinstance(high, int):
-                    butterfly[param] = np.random.randint(low, high)
-                else:
-                    butterfly[param] = np.random.uniform(low, high)
-            population.append(butterfly)
-        return population
-    
+        try:
+            population = []
+            for _ in range(self.n_butterflies):
+                butterfly = {}
+                for param, (low, high) in self.bounds.items():
+                    if isinstance(low, int) and isinstance(high, int):
+                        butterfly[param] = int(torch.randint(low, high+1, (1,), device=self.device).item())
+                    else:
+                        butterfly[param] = float(torch.rand(1, device=self.device).item() * (high - low) + low)
+                population.append(butterfly)
+            return population
+        except RuntimeError as e:
+            logger.error(f"CUDA error during initialization: {e}")
+            self.device = torch.device('cpu')
+            logger.info("Falling back to CPU")
+            return self.initialize()
+
     def migration(self, population):
-        new_population = []
-        for butterfly in population:
-            if np.random.random() < self.migration_ratio:
-                new_butterfly = {}
-                for param in butterfly:
-                    r = np.random.random()
-                    new_val = butterfly[param] + self.p_period * r * (self.best_solution[param] - butterfly[param])
-                    new_butterfly[param] = self.clip(new_val, param)
-                new_population.append(new_butterfly)
-            else:
-                new_population.append(butterfly.copy())
-        return new_population
+        try:
+            new_population = []
+            migration_tensor = torch.rand(len(population), device=self.device)
+            
+            for idx, butterfly in enumerate(population):
+                if migration_tensor[idx].item() < self.migration_ratio:
+                    new_butterfly = {}
+                    for param in butterfly:
+                        r = torch.rand(1, device=self.device).item()
+                        new_val = butterfly[param] + self.p_period * r * (self.best_solution[param] - butterfly[param])
+                        new_butterfly[param] = self.clip(new_val, param)
+                    new_population.append(new_butterfly)
+                else:
+                    new_population.append(butterfly.copy())
+            return new_population
+        except RuntimeError as e:
+            logger.error(f"CUDA error during migration: {e}")
+            self.device = torch.device('cpu')
+            logger.info("Falling back to CPU")
+            return self.migration(population)
     
     def clip(self, value, param):
         low, high = self.bounds[param]
@@ -132,8 +156,7 @@ def save_metrics(metrics):
         for metric, value in metrics.items():
             f.write(f"{metric}: {value:.4f}\n")
 
-def create_optimized_ensemble(X_train, y_train):
-    # Define parameter bounds for optimization
+def create_optimized_ensemble(X_train, y_train, mbo_params):
     param_bounds = {
         'svc_C': (0.1, 20.0),
         'svc_gamma': (0.001, 1.0),
@@ -143,6 +166,15 @@ def create_optimized_ensemble(X_train, y_train):
         'w2': (0, 5),
         'w3': (0, 5)
     }
+    
+    mbo = MonarchButterflyOptimizer(
+        param_bounds,
+        n_butterflies=int(mbo_params.get('n_butterflies', 20)),
+        p_period=float(mbo_params.get('p_period', 1.2)),
+        migration_ratio=float(mbo_params.get('migration_ratio', 0.85)),
+        max_iter=int(mbo_params.get('max_iter', 30)),
+        use_gpu=bool(mbo_params.get('use_gpu', False))
+    )
     
     def fitness_function(params):
         svc = SVC(kernel='rbf', C=params['svc_C'], 
@@ -171,8 +203,9 @@ def create_optimized_ensemble(X_train, y_train):
     
     return VotingClassifier(estimators=estimators, voting='soft', weights=weights)
 
-def main():
+def main(mbo_params=None):
     try:
+        logger.info("Loading data...")
         # Load and preprocess data
         df = pd.read_csv('./data/spam.csv', encoding='latin-1')
         df = df.drop(['Unnamed: 2', 'Unnamed: 3', 'Unnamed: 4'], axis=1)
@@ -196,7 +229,10 @@ def main():
         )
         
         logger.info("Training model with MBO...")
-        model = create_optimized_ensemble(X_train, y_train)
+        if mbo_params and mbo_params.get('use_gpu'):
+            logger.info("GPU acceleration enabled")
+        model = create_optimized_ensemble(X_train, y_train, mbo_params or {})
+        
         model.fit(X_train, y_train)
         
         y_pred = model.predict(X_test)
@@ -226,6 +262,4 @@ def main():
         raise
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
     main()

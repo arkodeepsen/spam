@@ -1,15 +1,12 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from PIL import Image, ImageTk
-import os
-import sys
-import io
+import os, sys, io, traceback, threading, torch
 from contextlib import redirect_stdout
-import threading
-import traceback
 from training.train_model_lite import main as train_lite
 from training.train_model_legacy import main as train_legacy  
 from training.train_model_mbo import main as train_mbo
+from torch.cuda import is_available as cuda_available
 
 class SpamDetectionUI:
     def __init__(self, root):
@@ -55,6 +52,54 @@ class SpamDetectionUI:
                        value="legacy", variable=self.model_var).pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(model_frame, text="Monarch Butterfly", 
                        value="mbo", variable=self.model_var).pack(side=tk.LEFT, padx=5)
+        
+                # Add MBO parameters frame
+        self.mbo_frame = ttk.LabelFrame(control_frame, text="MBO Parameters", padding=10)
+        
+        # MBO parameter entries
+        params = {
+            'n_butterflies': (20, 5, 100),  # default, min, max
+            'p_period': (1.2, 0.1, 5.0),
+            'migration_ratio': (0.85, 0.1, 1.0),
+            'max_iter': (30, 10, 100)
+        }
+        
+        self.mbo_params = {}
+        
+        for param, (default, min_val, max_val) in params.items():
+            frame = ttk.Frame(self.mbo_frame)
+            frame.pack(fill='x', padx=5, pady=2)
+            
+            ttk.Label(frame, text=f"{param}:").pack(side=tk.LEFT)
+            var = tk.StringVar(value=str(default))
+            entry = ttk.Entry(frame, textvariable=var, width=10)
+            entry.pack(side=tk.LEFT, padx=5)
+            
+            self.mbo_params[param] = {
+                'var': var,
+                'min': min_val,
+                'max': max_val
+            }
+        
+        # GPU checkbox
+        self.use_gpu = tk.BooleanVar(value=cuda_available())
+        self.gpu_check = ttk.Checkbutton(
+            self.mbo_frame, 
+            text="Use GPU (if available)", 
+            variable=self.use_gpu,
+            state='normal' if cuda_available() else 'disabled'
+        )
+        self.gpu_check.pack(pady=5)
+        
+        # Show/hide MBO parameters based on model selection
+        def on_model_change(*args):
+            if self.model_var.get() == "mbo":
+                self.mbo_frame.pack(fill="x", padx=5, pady=5, after=model_frame)
+            else:
+                self.mbo_frame.pack_forget()
+                
+        self.model_var.trace_add('write', on_model_change)
+        
         # Metrics display
         self.metrics_frame = ttk.LabelFrame(self.train_tab, text="Model Metrics", padding=10)
         self.metrics_frame.pack(fill="x", padx=5, pady=5)
@@ -152,7 +197,21 @@ class SpamDetectionUI:
                 elif model_type == "legacy":
                     train_legacy()
                 else:
-                    train_mbo()
+                    # Validate and get MBO parameters
+                    mbo_params = {}
+                    for param, config in self.mbo_params.items():
+                        try:
+                            value = float(config['var'].get())
+                            if not config['min'] <= value <= config['max']:
+                                raise ValueError(
+                                    f"{param} must be between {config['min']} and {config['max']}"
+                                )
+                            mbo_params[param] = value
+                        except ValueError as e:
+                            raise ValueError(f"Invalid {param}: {str(e)}")
+                    
+                    mbo_params['use_gpu'] = self.use_gpu.get()
+                    train_mbo(mbo_params)
                     
                 self.root.after(0, self.update_displays)
             except Exception:
