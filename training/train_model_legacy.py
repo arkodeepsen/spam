@@ -66,14 +66,25 @@ def plot_word_clouds(df):
     from wordcloud import WordCloud
     plt.figure(figsize=(15, 5))
     
-    for idx, label in enumerate([0, 1]):  # 0: ham, 1: spam
+    # Map text labels to numeric
+    df['target_num'] = df['target'].map({'ham': 0, 'spam': 1})
+    
+    for idx, label in enumerate(['ham', 'spam']):
+        # Get text for current label
         text = ' '.join(df[df['target'] == label]['transformed_text'])
-        wordcloud = WordCloud(width=800, height=400).generate(text)
         
-        plt.subplot(1, 2, idx+1)
-        plt.imshow(wordcloud)
-        plt.axis('off')
-        plt.title(f'Word Cloud - {"SPAM" if label else "HAM"}')
+        if not text.strip():
+            logger.warning(f"No text found for label: {label}")
+            continue
+            
+        try:
+            wordcloud = WordCloud(width=800, height=400).generate(text)
+            plt.subplot(1, 2, idx+1)
+            plt.imshow(wordcloud)
+            plt.axis('off')
+            plt.title(f'Word Cloud - {label.upper()}')
+        except Exception as e:
+            logger.error(f"Error generating wordcloud for {label}: {e}")
     
     plt.savefig('./graphs/wordclouds.png')
     plt.close()
@@ -117,6 +128,8 @@ def main():
         df = df.drop(['Unnamed: 2', 'Unnamed: 3', 'Unnamed: 4'], axis=1)
         df = df.rename(columns={'v1': 'target', 'v2': 'text'})
         
+        logger.info(f"Target value counts:\n{df['target'].value_counts()}")
+        
         # Add numerical features
         df['num_characters'] = df['text'].apply(len)
         df['num_words'] = df['text'].apply(lambda x: len(nltk.word_tokenize(x)))
@@ -125,6 +138,9 @@ def main():
         logger.info("Transforming text...")
         df['transformed_text'] = df['text'].apply(transform_text)
         
+        # Verify transformed text
+        logger.info(f"Sample transformed text:\n{df['transformed_text'].head()}")
+        
         logger.info("Generating visualizations...")
         plot_dataset_insights(df)
         plot_word_clouds(df)
@@ -132,8 +148,8 @@ def main():
         # Text vectorization
         tfidf = TfidfVectorizer(max_features=3000)
         X = tfidf.fit_transform(df['transformed_text']).toarray()
-        y = df['target'].values
-        
+        # Convert target to numeric for model
+        y = (df['target'] == 'spam').astype(int)
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=2)
         
         # Create ensemble
